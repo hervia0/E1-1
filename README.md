@@ -65,8 +65,8 @@ Docker version 29.9.2, build a82e528
 | hello-world / ubuntu 컨테이너 | ✅ 완료 | [8. 컨테이너 실행 실습](#8-컨테이너-실행-실습) |
 | Dockerfile 커스텀 이미지 | ✅ 완료 | [9. Dockerfile 기반 커스텀 이미지](#9-dockerfile-기반-커스텀-이미지) |
 | 포트 매핑 | ✅ 완료 | [10. 포트 매핑 및 접속 확인](#10-포트-매핑-및-접속-확인) |
-| 바인드 마운트 | ⬜ 진행 예정 | [11. 바인드 마운트](#11-바인드-마운트) |
-| Docker 볼륨 | ⬜ 진행 예정 | [12. Docker 볼륨 영속성](#12-docker-볼륨-영속성) |
+| 바인드 마운트 | ✅ 완료 | [11. 바인드 마운트](#11-바인드-마운트) |
+| Docker 볼륨 | ✅ 완료 | [12. Docker 볼륨 영속성](#12-docker-볼륨-영속성) |
 | Git 설정 | ✅ 완료 | [13. Git 설정 및 GitHub 연동](#13-git-설정-및-github-연동) |
 | GitHub / VS Code 연동 | ✅ 완료 | [13. Git 설정 및 GitHub 연동](#13-git-설정-및-github-연동) |
 | 트러블슈팅 2건 이상 | ✅ 완료 | [14. 트러블슈팅](#14-트러블슈팅) |
@@ -609,13 +609,190 @@ PS D:\codyssey\E1-1> curl.exe http://localhost:8080
 
 ## 11. 바인드 마운트
 
-> 진행 예정 — 실행 명령, 호스트 파일 변경 전/후 비교
+호스트의 `bind-test/` 폴더를 NGINX 컨테이너의 웹 루트에 연결하고, 호스트에서 파일을 수정했을 때 **컨테이너를 재시작하지 않아도 바로 반영되는지** 확인했다.
+
+### 11.1 실습 파일 준비
+
+```
+PS D:\codyssey\E1-1> mkdir bind-test
+PS D:\codyssey\E1-1> "<h1>Before:bind mount test<h1>" | Out-File -Encoding utf8 bind-test/index.html
+PS D:\codyssey\E1-1> Get-Content bind-test/index.html
+<h1>Before:bind mount test<h1>
+```
+
+### 11.2 바인드 마운트로 컨테이너 실행
+
+```
+PS D:\codyssey\E1-1> docker run -d --name my-web-bind -p 8081:80 -v "${PWD}/bind-test:/usr/share/nginx/html" nginx:alpine
+e10770b527072c70444482bbf34dd1230875396208b3a2d3e538af2e71d91c88
+
+PS D:\codyssey\E1-1> docker ps
+CONTAINER ID   IMAGE          COMMAND                   CREATED         STATUS         PORTS                                     NAMES
+e10770b52707   nginx:alpine   "/docker-entrypoint.…"   9 seconds ago   Up 8 seconds   0.0.0.0:8081->80/tcp, [::]:8081->80/tcp   my-web-bind
+```
+
+- `-v 호스트경로:컨테이너경로` 형식으로, 호스트의 `D:\codyssey\E1-1\bind-test`를 컨테이너의 `/usr/share/nginx/html`에 연결했다.
+- PowerShell에서는 현재 폴더를 `${PWD}`로 표기한다. (Bash에서는 `$(pwd)`)
+
+```
+PS D:\codyssey\E1-1> docker inspect my-web-bind --format "{{json .Mounts}}"
+[{"Type":"bind","Source":"D:\\codyssey\\E1-1/bind-test","Destination":"/usr/share/nginx/html","Mode":"","RW":true,"Propagation":"rprivate"}]
+```
+
+- `Type`이 `bind`이고, `Source`(호스트)와 `Destination`(컨테이너)이 연결되어 있다. `RW: true`로 양방향 읽기·쓰기가 가능하다.
+
+### 11.3 변경 전
+
+```
+PS D:\codyssey\E1-1> curl.exe http://localhost:8081
+<h1>Before:bind mount test<h1>
+PS D:\codyssey\E1-1> docker exec my-web-bind cat /usr/share/nginx/html/index.html
+<h1>Before:bind mount test<h1>
+```
+
+### 11.4 호스트에서 파일 수정
+
+```
+PS D:\codyssey\E1-1> "<h1>After: changed on host!</h1>" | Out-File -Encoding utf8 bind-test/index.html
+```
+
+### 11.5 변경 후 (컨테이너 재시작 없음)
+
+```
+PS D:\codyssey\E1-1> curl.exe http://localhost:8081
+<h1>After: changed on host!</h1>
+PS D:\codyssey\E1-1> docker exec my-web-bind cat /usr/share/nginx/html/index.html
+<h1>After: changed on host!</h1>
+```
+
+### 11.6 반대 방향: 컨테이너 → 호스트
+
+```
+PS D:\codyssey\E1-1> docker exec my-web-bind sh -c "echo 'created in container' > /usr/share/nginx/html/from-container.txt"
+PS D:\codyssey\E1-1> Get-ChildItem bind-test
+
+    디렉터리: D:\codyssey\E1-1\bind-test
+
+Mode                 LastWriteTime         Length Name
+----                 -------------         ------ ----
+-a----      2026-11-05   오후 6:57             21 from-container.txt
+-a----      2026-11-05   오후 6:55             37 index.html
+
+PS D:\codyssey\E1-1> Get-Content bind-test/from-container.txt
+created in container
+```
+
+### 11.7 비교 정리
+
+| 시점 | 호스트 `bind-test/index.html` | 컨테이너 응답 (`curl`) |
+| --- | --- | --- |
+| 변경 전 | `Before:bind mount test` | `Before:bind mount test` |
+| 호스트에서 수정 후 | `After: changed on host!` | `After: changed on host!` (재시작 없이 즉시 반영) |
+
+- 바인드 마운트는 파일을 **복사하는 것이 아니라 같은 폴더를 공유**하므로, 호스트와 컨테이너 어느 쪽에서 바꿔도 반대쪽에 바로 보인다.
+- 반면 9장의 커스텀 이미지는 빌드 시점에 `COPY`로 파일을 이미지에 넣었으므로, `app/index.html`을 수정하면 **다시 빌드해야** 반영된다.
+- 이 특성 때문에 바인드 마운트는 **개발 중 코드를 실시간으로 반영**할 때 주로 사용한다.
 
 ---
 
 ## 12. Docker 볼륨 영속성
 
-> 진행 예정 — 볼륨 생성/연결, 컨테이너 삭제 전/후 데이터 비교
+Docker 볼륨에 데이터를 저장한 뒤 컨테이너를 **완전히 삭제**하고, 새 컨테이너에 같은 볼륨을 연결해 데이터가 남아 있는지 확인했다.
+
+### 12.1 볼륨 생성
+
+```
+PS D:\codyssey\E1-1> docker volume create mydata
+mydata
+PS D:\codyssey\E1-1> docker volume ls
+DRIVER    VOLUME NAME
+local     mydata
+PS D:\codyssey\E1-1> docker volume inspect mydata
+[
+    {
+        "CreatedAt": "2026-11-05T10:00:10Z",
+        "Driver": "local",
+        "Labels": null,
+        "Mountpoint": "/var/lib/docker/volumes/mydata/_data",
+        "Name": "mydata",
+        "Options": null,
+        "Scope": "local"
+    }
+]
+```
+
+- 볼륨 데이터는 Docker가 관리하는 영역(`/var/lib/docker/volumes/mydata/_data`)에 저장된다. 바인드 마운트처럼 내가 경로를 지정하지 않는다.
+
+### 12.2 볼륨 연결 및 데이터 쓰기
+
+```
+PS D:\codyssey\E1-1> docker run -d --name vol-test -v mydata:/data ubuntu sleep infinity
+858d8a95c1065876df411207c29afa331d3688e74f3f0181f8520faa61b1f329
+PS D:\codyssey\E1-1> docker ps
+CONTAINER ID   IMAGE          COMMAND                   CREATED         STATUS         PORTS                                     NAMES
+858d8a95c106   ubuntu         "sleep infinity"          3 seconds ago   Up 2 seconds                                             vol-test
+e10770b52707   nginx:alpine   "/docker-entrypoint.…"   7 minutes ago   Up 7 minutes   0.0.0.0:8081->80/tcp, [::]:8081->80/tcp   my-web-bind
+
+PS D:\codyssey\E1-1> docker exec vol-test bash -c "echo 'persist me' > /data/hello.txt"
+```
+
+- `-v 볼륨명:컨테이너경로` 형식으로 `mydata` 볼륨을 컨테이너의 `/data`에 연결했다.
+- `ubuntu`는 실행할 작업이 없으면 바로 종료되므로, `sleep infinity`로 컨테이너를 계속 실행 상태로 유지했다.
+
+### 12.3 삭제 전 확인
+
+```
+PS D:\codyssey\E1-1> docker exec vol-test cat /data/hello.txt
+persist me
+```
+
+### 12.4 컨테이너 삭제
+
+```
+PS D:\codyssey\E1-1> docker rm -f vol-test
+vol-test
+PS D:\codyssey\E1-1> docker ps -a
+CONTAINER ID   IMAGE          COMMAND                   CREATED         STATUS                    PORTS                                     NAMES
+e10770b52707   nginx:alpine   "/docker-entrypoint.…"   8 minutes ago   Up 8 minutes              0.0.0.0:8081->80/tcp, [::]:8081->80/tcp   my-web-bind
+e8b8f49fe6df   my-web:1.0     "/docker-entrypoint.…"   2 days ago      Exited (255) 2 days ago   0.0.0.0:8080->80/tcp                      my-web
+a5eb6076e6d5   ubuntu         "bash"                    3 days ago      Exited (0) 2 days ago                                               practice
+f29dc136fde3   hello-world    "/hello"                  5 days ago      Exited (0) 5 days ago                                               stupefied_snyder
+
+PS D:\codyssey\E1-1> docker volume ls
+DRIVER    VOLUME NAME
+local     mydata
+```
+
+- `docker ps -a`에 `vol-test`가 없으므로 컨테이너가 완전히 삭제되었다.
+- 그러나 `docker volume ls`에는 `mydata`가 그대로 남아 있다.
+
+### 12.5 삭제 후: 새 컨테이너에서 확인
+
+```
+PS D:\codyssey\E1-1> docker run --rm --name vol-test2 -v mydata:/data ubuntu cat /data/hello.txt
+persist me
+```
+
+- 전혀 새로운 컨테이너(`vol-test2`)에 같은 볼륨을 연결하자, 이전 컨테이너가 쓴 데이터가 그대로 읽혔다.
+- `--rm`은 명령이 끝나면 컨테이너를 자동 삭제하는 옵션이다.
+
+### 12.6 비교 정리
+
+| 시점 | 컨테이너 | 볼륨 `mydata` | `/data/hello.txt` |
+| --- | --- | --- | --- |
+| 삭제 전 | `vol-test` 실행 중 | 존재 | `persist me` |
+| `docker rm -f vol-test` 후 | 없음 | **존재** | — |
+| 새 컨테이너 연결 | `vol-test2` | 존재 | **`persist me`** (유지) |
+
+- 컨테이너 내부의 쓰기 계층은 컨테이너를 삭제하면 함께 사라지지만, **볼륨은 컨테이너와 별도의 생명주기**를 가진다.
+- 따라서 데이터베이스 파일처럼 컨테이너를 교체해도 유지되어야 하는 **영속 데이터**는 볼륨에 저장한다.
+- 볼륨을 지우려면 `docker volume rm mydata`처럼 **명시적으로** 삭제해야 한다.
+
+| | 바인드 마운트 (11장) | Docker 볼륨 (12장) |
+| --- | --- | --- |
+| 지정 방식 | `-v 호스트경로:컨테이너경로` | `-v 볼륨명:컨테이너경로` |
+| 저장 위치 | 내가 지정한 호스트 폴더 | Docker 관리 영역 |
+| 주 용도 | 개발 중 코드 실시간 반영 | 영속 데이터 보관 |
 
 ---
 
