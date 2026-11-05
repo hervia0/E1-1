@@ -19,6 +19,7 @@
 13. [Git 설정 및 GitHub 연동](#13-git-설정-및-github-연동)
 14. [트러블슈팅](#14-트러블슈팅)
 15. [보안 및 개인정보 보호](#15-보안-및-개인정보-보호)
+16. [보너스: Docker Compose](#16-보너스-docker-compose)
 
 ---
 
@@ -890,3 +891,125 @@ PS D:\codyssey\E1-1> wsl -l -v
 
 - 문서·로그·스크린샷에 토큰, 비밀번호, 개인키, 인증 코드가 포함되지 않도록 확인했다.
 - GitHub 인증은 Git Credential Manager(`credential.helper=manager`)를 사용하며, 인증 정보는 저장소에 기록되지 않는다.
+
+---
+
+## 16. 보너스: Docker Compose
+
+### 16.1 Compose 기초 (단일 서비스)
+
+9장에서 `docker build` + `docker run`으로 실행하던 웹 서버를 `docker-compose.yml` 하나로 옮겼다.
+
+```yaml
+services:
+  web:
+    build: .                 # 현재 폴더의 Dockerfile로 빌드
+    image: my-web:compose
+    container_name: compose-web
+    ports:
+      - "8080:80"            # = docker run -p 8080:80
+```
+
+| `docker` 명령 | Compose 항목 |
+| --- | --- |
+| `docker build -t my-web .` | `build: .` + `image:` |
+| `--name my-web` | `container_name:` |
+| `-p 8080:80` | `ports:` |
+| `-d` | `docker compose up -d` |
+
+**배움 포인트: 실행 명령이 "문서화된 실행 설정"으로 바뀌는 이유**
+
+- `docker run`의 옵션은 터미널에서 실행하고 나면 기록이 남지 않아, 다른 사람이 같은 환경을 재현하려면 명령을 따로 전달해야 한다.
+- Compose 파일은 실행 설정 자체가 **저장소에 커밋되는 문서**가 되므로, 누구든 `docker compose up` 한 줄로 같은 환경을 띄울 수 있다.
+- 옵션이 늘어나도(포트, 볼륨, 환경 변수, 여러 서비스) 명령이 길어지지 않고 파일에서 한눈에 관리된다.
+
+### 16.2 실행 및 확인
+
+```
+PS D:\codyssey\E1-1> docker compose up -d --build
+```
+
+```
+PS D:\codyssey\E1-1> docker compose ps
+NAME          IMAGE            COMMAND                   SERVICE   CREATED         STATUS                            PORTS
+compose-web   my-web:compose   "/docker-entrypoint.…"   web       6 seconds ago   Up 5 seconds (health: starting)   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp
+
+PS D:\codyssey\E1-1> curl.exe http://localhost:8080
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>E1-1 Custom NGINX</title>
+</head>
+<body>
+  <h1>Hello from my custom NGINX!</h1>
+  <p>E1-1 개발 워크스테이션 구축 과제</p>
+</body>
+</html>
+```
+
+- `up --build` 한 번으로 **이미지 빌드 → 네트워크 생성 → 컨테이너 실행**이 모두 수행되었다.
+- Dockerfile의 `HEALTHCHECK`가 그대로 적용되어 `health: starting` 상태가 표시된다.
+
+### 16.3 Compose 운영 명령 (up / ps / logs / down)
+
+**logs**
+
+```
+PS D:\codyssey\E1-1> docker compose logs
+compose-web  | /docker-entrypoint.sh: Configuration complete; ready for start up
+compose-web  | 2026/11/05 10:37:07 [notice] 1#1: nginx/1.31.8
+compose-web  | 2026/11/05 10:37:07 [notice] 1#1: start worker processes
+...
+compose-web  | 172.18.0.1 - - [05/Nov/2026:10:37:32 +0000] "GET / HTTP/1.1" 200 235 "-" "curl/8.21.0" "-"
+compose-web  | ::1 - - [05/Nov/2026:10:37:37 +0000] "GET / HTTP/1.1" 200 235 "-" "Wget" "-"
+```
+
+- 각 줄 앞에 **컨테이너 이름(`compose-web |`)** 이 붙어, 여러 서비스를 함께 띄웠을 때 어느 서비스의 로그인지 구분할 수 있다.
+- `docker compose logs -f web`은 특정 서비스의 로그를 실시간으로 따라간다. (`Ctrl+C`로 종료해도 컨테이너는 계속 실행된다.)
+
+**down**
+
+```
+PS D:\codyssey\E1-1> docker compose down
+[+] down 2/2
+ ✔ Container compose-web Removed                                0.7s
+ ✔ Network e1-1_default  Removed                                0.3s
+
+PS D:\codyssey\E1-1> docker compose ps
+NAME      IMAGE     COMMAND   SERVICE   CREATED   STATUS    PORTS
+
+PS D:\codyssey\E1-1> docker ps -a
+CONTAINER ID   IMAGE         COMMAND    CREATED      STATUS                  PORTS     NAMES
+a5eb6076e6d5   ubuntu        "bash"     3 days ago   Exited (0) 2 days ago             practice
+f29dc136fde3   hello-world   "/hello"   5 days ago   Exited (0) 5 days ago             stupefied_snyder
+
+PS D:\codyssey\E1-1> docker network ls
+NETWORK ID     NAME      DRIVER    SCOPE
+914b35deb5d3   bridge    bridge    local
+a26aa5573861   host      host      local
+3d6a6d60b145   none      null      local
+```
+
+- `down` 한 번으로 컨테이너 **삭제**와 Compose가 만든 네트워크 **삭제**까지 정리된다. (`docker stop` + `docker rm` + `docker network rm`에 해당)
+- `docker ps -a`에도 `compose-web`이 남아 있지 않다.
+
+**상태 확인 루틴**
+
+| 순서 | 명령 | 확인 내용 |
+| --- | --- | --- |
+| 1 | `docker compose up -d --build` | 빌드·실행 |
+| 2 | `docker compose ps` | 서비스 상태, 헬스체크, 포트 |
+| 3 | `curl.exe http://localhost:8080` | 실제 응답 |
+| 4 | `docker compose logs` | 요청·에러 기록 |
+| 5 | `docker compose down` | 컨테이너·네트워크 정리 |
+
+### 16.4 Compose 전용 네트워크
+
+| 실행 방식 | 호스트 요청이 기록된 IP | 사용한 네트워크 |
+| --- | --- | --- |
+| `docker run` (7장) | `172.17.0.1` | Docker 기본 `bridge` |
+| `docker compose up` | `172.18.0.1` | Compose가 자동 생성한 `e1-1_default` |
+
+- Compose는 프로젝트(폴더 이름 `e1-1`)마다 **전용 네트워크**를 자동으로 만들고, `down` 시 함께 삭제한다.
+- 같은 Compose 네트워크 안의 서비스끼리는 **서비스 이름으로 서로 통신**할 수 있다.

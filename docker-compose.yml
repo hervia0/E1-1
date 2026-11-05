@@ -1,0 +1,7 @@
+services:
+  web:
+    build: .                 # 현재 폴더의 Dockerfile로 빌드
+    image: my-web:compose
+    container_name: compose-web
+    ports:
+      - "8080:80"            # = docker run -p 8080:80
