@@ -1203,3 +1203,132 @@ compose-web   my-web:compose   "/docker-entrypoint.…"   web       36 seconds a
 - 같은 이미지를 개발·운영 환경에서 **설정 값만 바꿔** 재사용할 수 있다. 환경마다 이미지를 따로 빌드할 필요가 없다.
 - 설정이 코드와 분리되어 있어, 값을 바꿀 때 소스 수정·재빌드·재배포 없이 컨테이너 재생성만으로 반영된다.
 - 실무에서는 `.env`에 비밀번호·API 키 같은 민감정보를 넣는 경우가 많으므로 `.gitignore`에 추가하고, 변수 목록만 담은 `.env.example`을 공유한다. 이 실습의 `.env`에는 민감정보가 없어 재현성을 위해 저장소에 포함했다.
+
+### 16.6 멀티 컨테이너와 서비스 간 통신
+
+**목표**: 웹 서버(`web`) 옆에 보조 서비스(`client`)를 함께 띄우고, IP 주소 없이 **서비스 이름**으로 통신되는지 확인한다.
+
+`docker-compose.yml`에 추가한 서비스
+
+```yaml
+  client:
+    image: alpine:3.20
+    container_name: compose-client
+    command: sleep infinity           # 계속 실행 상태로 유지
+    depends_on:
+      web:
+        condition: service_healthy    # web이 healthy가 된 뒤에 시작
+```
+
+**① 실행: 의존성 순서 확인**
+
+```
+PS D:\codyssey\E1-1> docker compose up -d
+[+] up 3/3
+ ✔ Network e1-1_default     Created                                     0.1s
+ ✔ Container compose-web    Healthy                                    31.4s
+ ✔ Container compose-client Started                                    31.6s
+
+PS D:\codyssey\E1-1> docker compose ps
+NAME             IMAGE            COMMAND                   SERVICE   CREATED          STATUS                    PORTS
+compose-client   alpine:3.20      "sleep infinity"          client    9 seconds ago    Up 8 seconds
+compose-web      my-web:compose   "/docker-entrypoint.…"   web       10 minutes ago   Up 10 minutes (healthy)   0.0.0.0:8080->8000/tcp, [::]:8080->8000/tcp
+```
+
+- `depends_on`의 `condition: service_healthy`에 따라 `compose-web`이 **Healthy가 된 뒤(31.4s)에** `compose-client`가 시작되었다.
+- `client`는 외부에 공개할 필요가 없어 `ports`를 지정하지 않았다.
+
+**② 같은 네트워크에 연결된 컨테이너**
+
+```
+PS D:\codyssey\E1-1> docker network inspect e1-1_default --format "{{range .Containers}}{{.Name}} {{.IPv4Address}}{{println}}{{end}}"
+compose-client 172.18.0.3/16
+compose-web 172.18.0.2/16
+```
+
+**③ 서비스 이름 → IP 변환 (서비스 디스커버리)**
+
+```
+PS D:\codyssey\E1-1> docker compose exec client nslookup web
+Server:         127.0.0.11
+Address:        127.0.0.11:53
+
+Non-authoritative answer:
+Name:   web
+Address: 172.18.0.2
+
+PS D:\codyssey\E1-1> docker compose exec client ping -c 2 web
+PING web (172.18.0.2): 56 data bytes
+64 bytes from 172.18.0.2: seq=0 ttl=64 time=4.261 ms
+64 bytes from 172.18.0.2: seq=1 ttl=64 time=0.159 ms
+
+--- web ping statistics ---
+2 packets transmitted, 2 packets received, 0% packet loss
+```
+
+- `127.0.0.11`은 Docker가 사용자 정의 네트워크마다 제공하는 **내장 DNS 서버**다. 서비스 이름 `web`을 `compose-web`의 IP(`172.18.0.2`)로 알려준다.
+
+**④ 서비스 이름으로 HTTP 요청**
+
+```
+PS D:\codyssey\E1-1> docker compose exec client wget -qO- http://web:8000
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>E1-1 Custom NGINX</title>
+</head>
+<body>
+  <h1>Hello from my custom NGINX!</h1>
+  <p>E1-1 개발 워크스테이션 구축 과제</p>
+</body>
+</html>
+
+PS D:\codyssey\E1-1> docker compose exec client wget -S -qO /dev/null http://web:8000
+  HTTP/1.1 200 OK
+  Server: nginx/1.31.8
+  Content-Type: text/html
+  Content-Length: 235
+  Connection: close
+  X-App-Mode: development
+```
+
+- `client`에서 `http://web:8000`으로 웹 서버의 페이지와 헤더(16.5에서 설정한 `X-App-Mode: development`)를 받았다.
+
+**⑤ 비교: `localhost:8080`은 실패**
+
+```
+PS D:\codyssey\E1-1> docker compose exec client wget -qO- http://localhost:8080
+wget: can't connect to remote host: Connection refused
+```
+
+| 접속 주소 (client 안에서) | 결과 | 이유 |
+| --- | --- | --- |
+| `http://web:8000` | ✅ 성공 | 서비스 이름 + **컨테이너 포트** |
+| `http://localhost:8080` | ❌ 실패 | `localhost`는 `client` 자신, `8080`은 **호스트** 포트 |
+
+- 컨테이너끼리는 Compose 네트워크 안에서 **서비스 이름과 컨테이너 포트**로 통신한다. 포트 매핑(`8080:8000`)은 **호스트 → 컨테이너** 접속에만 쓰인다.
+
+**⑥ 정리**
+
+```
+PS D:\codyssey\E1-1> docker compose down
+[+] down 3/3
+ ✔ Container compose-client Removed                                     3.4s
+ ✔ Container compose-web    Removed                                     0.5s
+ ✔ Network e1-1_default     Removed                                     0.3s
+```
+
+**참고: `docker exec` vs `docker compose exec`**
+
+```
+PS D:\codyssey\E1-1> docker exec client wget -qO- http://web:8000
+Error response from daemon: No such container: client
+```
+
+- `docker exec`는 **컨테이너 이름**(`compose-client`)을, `docker compose exec`는 **서비스 이름**(`client`)을 받는다.
+
+**배움 포인트: 네트워크와 서비스 디스커버리**
+
+- 컨테이너 IP는 재생성할 때마다 바뀔 수 있지만, 서비스 이름은 Compose 파일에 고정되어 있다. 서비스끼리 **이름으로 찾아가므로** IP를 설정에 적을 필요가 없다.
+- 실무에서 웹 서버가 `db`, `redis` 같은 이름으로 데이터베이스·캐시에 접속하는 것이 같은 원리다.

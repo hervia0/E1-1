@@ -14,3 +14,10 @@ services:
       test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:$${NGINX_PORT}/ || exit 1"]
       interval: 30s
       timeout: 3s
+  client:
+    image: alpine:3.20
+    container_name: compose-client
+    command: sleep infinity
+    depends_on:
+      web:
+        condition: service_healthy
