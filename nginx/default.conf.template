@@ -1,0 +1,14 @@
+server {
+    listen       ${NGINX_PORT};
+    listen       [::]:${NGINX_PORT};    #추가: IPv6 대기
+    server_name  localhost;
+    
+
+    # 현재 실행 모드를 응답 헤더로 표시
+    add_header X-App-Mode ${APP_MODE} always;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html;
+    }
+}

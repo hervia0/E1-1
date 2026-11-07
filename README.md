@@ -885,6 +885,44 @@ PS D:\codyssey\E1-1> wsl -l -v
 
 > 배운 점: docker CLI(클라이언트)는 데몬과 named pipe로 통신하며, 이 통로는 Docker Desktop이 실행 중일 때만 생성된다. 같은 에러라도 메시지의 **연결 대상**을 보면 원인 범위(네트워크 vs 로컬 데몬)를 좁힐 수 있다.
 
+### 14.4 nginx 설정 템플릿 적용 후 헬스체크 실패 (unhealthy)
+
+| 단계 | 내용 |
+| --- | --- |
+| **문제** | 환경 변수 실습([16.5](#165-환경-변수로-포트모드-변경))에서 nginx 설정을 템플릿으로 교체한 뒤, 호스트의 `curl`은 `200 OK`로 응답하는데 `docker compose ps`가 `(unhealthy)`로 표시됨 |
+| **원인 가설** | 외부 요청은 성공하므로 nginx는 동작 중. 헬스체크만 실패하므로 **헬스체크가 접속하는 주소**(`localhost`)와 nginx가 대기하는 주소가 다를 것 |
+| **확인** | ① `docker inspect`의 헬스체크 로그: `wget: can't connect to remote host: Connection refused` ② 컨테이너 안에서 `wget http://localhost:80/`은 실패, `wget http://127.0.0.1:80/`은 성공 ③ 설정 파일에 `listen 80;`(IPv4)만 있고 `listen [::]:80;`(IPv6)이 없음 |
+| **원인** | 컨테이너 안의 `localhost`는 IPv6(`::1`)로 먼저 연결된다. 기존에는 nginx 시작 스크립트 `10-listen-on-ipv6-by-default.sh`가 IPv6 대기를 자동 추가했지만, 그 다음 단계인 `20-envsubst-on-templates.sh`가 **내 템플릿으로 설정 파일을 덮어써** IPv6 대기가 사라졌다 |
+| **해결** | 템플릿에 `listen [::]:${NGINX_PORT};` 추가 → `docker compose up -d --force-recreate` → `(healthy)` 확인 |
+
+```
+PS D:\codyssey\E1-1> docker inspect compose-web --format "{{json .State.Health.Log}}"
+... "ExitCode":1, "Output":"wget: can't connect to remote host: Connection refused" ...
+
+PS D:\codyssey\E1-1> docker compose exec web sh -c "wget -q -O /dev/null http://localhost:80/; echo localhost=$?; wget -q -O /dev/null http://127.0.0.1:80/; echo ipv4=$?"
+wget: can't connect to remote host: Connection refused
+localhost=1
+ipv4=0
+```
+
+**수정 후**
+
+```
+PS D:\codyssey\E1-1> docker compose up -d --force-recreate
+[+] up 1/1
+ ✔ Container compose-web Started                                        1.7s
+PS D:\codyssey\E1-1> docker compose exec web cat /etc/nginx/conf.d/default.conf
+server {
+    listen       80;
+    listen       [::]:80;    #추가: IPv6 대기
+    ...
+PS D:\codyssey\E1-1> docker compose ps
+NAME          IMAGE            COMMAND                   SERVICE   CREATED         STATUS                   PORTS
+compose-web   my-web:compose   "/docker-entrypoint.…"   web       3 minutes ago   Up 3 minutes (healthy)   0.0.0.0:8080->80/tcp, [::]:8080->80/tcp
+```
+
+> 배운 점: "외부에서는 되는데 내부 점검만 실패"하면 **접속 경로(주소·프로토콜)의 차이**를 먼저 의심한다. 또한 공식 이미지의 설정을 덮어쓸 때는 기존 설정이 해 주던 일(여기서는 IPv6 대기)이 함께 사라지지 않는지 확인해야 한다.
+
 ---
 
 ## 15. 보안 및 개인정보 보호
@@ -927,6 +965,18 @@ services:
 
 ```
 PS D:\codyssey\E1-1> docker compose up -d --build
+[+] Building 1.8s (9/9) FINISHED
+ => [internal] load local bake definitions                              0.1s
+ => [internal] load build definition from Dockerfile                    0.1s
+ => [internal] load metadata for docker.io/library/nginx:alpine         0.1s
+ => [1/2] FROM docker.io/library/nginx:alpine@sha256:785835ea65db...    0.1s
+ => CACHED [2/2] COPY app/ /usr/share/nginx/html/                       0.0s
+ => exporting to image                                                  0.2s
+ => => naming to docker.io/library/my-web:compose                       0.0s
+[+] up 3/3
+ ✔ Image my-web:compose  Built                                         14.1s
+ ✔ Network e1-1_default  Created                                        0.1s
+ ✔ Container compose-web Started                                        1.0s
 ```
 
 ```
@@ -1013,3 +1063,143 @@ a26aa5573861   host      host      local
 
 - Compose는 프로젝트(폴더 이름 `e1-1`)마다 **전용 네트워크**를 자동으로 만들고, `down` 시 함께 삭제한다.
 - 같은 Compose 네트워크 안의 서비스끼리는 **서비스 이름으로 서로 통신**할 수 있다.
+
+### 16.5 환경 변수로 포트·모드 변경
+
+**목표**: 이미지(코드)는 그대로 두고 `.env`의 값만 바꿔서 서버의 **대기 포트**와 **실행 모드**를 바꾼다.
+
+**원리**: nginx 공식 이미지는 시작할 때 `/etc/nginx/templates/*.template` 파일의 `${변수}`를 환경 변수 값으로 치환해 `/etc/nginx/conf.d/`에 설정 파일을 만든다. (`20-envsubst-on-templates.sh`)
+
+**파일 구성**
+
+`nginx/default.conf.template`
+
+```nginx
+server {
+    listen       ${NGINX_PORT};
+    listen       [::]:${NGINX_PORT};    #추가: IPv6 대기
+    server_name  localhost;
+
+    # 현재 실행 모드를 응답 헤더로 표시
+    add_header X-App-Mode ${APP_MODE} always;
+
+    location / {
+        root   /usr/share/nginx/html;
+        index  index.html;
+    }
+}
+```
+
+`.env`
+
+```
+NGINX_PORT=80
+APP_MODE=production
+```
+
+`docker-compose.yml` (16.1에서 확장)
+
+```yaml
+services:
+  web:
+    build: .
+    image: my-web:compose
+    container_name: compose-web
+    environment:
+      NGINX_PORT: ${NGINX_PORT:-80}        # .env 값 주입 (없으면 80)
+      APP_MODE: ${APP_MODE:-production}
+    ports:
+      - "8080:${NGINX_PORT:-80}"           # 컨테이너 포트도 변수로
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:                           # 포트가 바뀌어도 헬스체크가 맞도록
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:$${NGINX_PORT}/ || exit 1"]
+      interval: 30s
+      timeout: 3s
+```
+
+| 항목 | 역할 |
+| --- | --- |
+| `.env` | Compose가 자동으로 읽는 설정 값 파일 |
+| `${NGINX_PORT:-80}` | `.env`(또는 셸 환경 변수) 값으로 치환, 없으면 기본값 `80` |
+| `environment:` | 컨테이너 안에 환경 변수로 주입 |
+| `volumes:` (`:ro`) | 템플릿을 읽기 전용으로 마운트 |
+| `$${NGINX_PORT}` | `$$`는 Compose가 치환하지 않고, 컨테이너 안의 셸이 해석하도록 남김 |
+
+**① production (NGINX_PORT=80, APP_MODE=production)**
+
+```
+PS D:\codyssey\E1-1> curl.exe -i http://localhost:8080
+HTTP/1.1 200 OK
+Server: nginx/1.31.8
+...
+X-App-Mode: production
+
+PS D:\codyssey\E1-1> docker compose exec web printenv NGINX_PORT APP_MODE
+80
+production
+
+PS D:\codyssey\E1-1> docker compose exec web cat /etc/nginx/conf.d/default.conf
+server {
+    listen       80;
+    listen       [::]:80;    #추가: IPv6 대기
+    server_name  localhost;
+    ...
+    add_header X-App-Mode production always;
+```
+
+**② `.env`만 수정 → development (NGINX_PORT=8000, APP_MODE=development)**
+
+```
+NGINX_PORT=8000
+APP_MODE=development
+```
+
+```
+PS D:\codyssey\E1-1> docker compose up -d
+[+] up 1/1
+ ✔ Container compose-web Started                                        1.0s
+
+PS D:\codyssey\E1-1> curl.exe -i http://localhost:8080
+HTTP/1.1 200 OK
+Server: nginx/1.31.8
+...
+X-App-Mode: development
+
+PS D:\codyssey\E1-1> docker compose exec web printenv NGINX_PORT APP_MODE
+8000
+development
+
+PS D:\codyssey\E1-1> docker compose exec web cat /etc/nginx/conf.d/default.conf
+server {
+    listen       8000;
+    listen       [::]:8000;    #추가: IPv6 대기
+    server_name  localhost;
+    ...
+    add_header X-App-Mode development always;
+
+PS D:\codyssey\E1-1> docker compose ps
+NAME          IMAGE            COMMAND                   SERVICE   CREATED          STATUS                    PORTS
+compose-web   my-web:compose   "/docker-entrypoint.…"   web       36 seconds ago   Up 36 seconds (healthy)   0.0.0.0:8080->8000/tcp, [::]:8080->8000/tcp
+```
+
+**비교**
+
+| 항목 | production | development |
+| --- | --- | --- |
+| `.env` | `NGINX_PORT=80`, `APP_MODE=production` | `NGINX_PORT=8000`, `APP_MODE=development` |
+| nginx 대기 포트 | `listen 80;` | `listen 8000;` |
+| 포트 매핑 | `8080->80/tcp` | `8080->8000/tcp` |
+| 응답 헤더 | `X-App-Mode: production` | `X-App-Mode: development` |
+| 헬스체크 | `healthy` | `healthy` |
+| 이미지 재빌드 | — | **없음** |
+
+- `.env`를 바꾸고 `docker compose up -d`만 실행하자, Compose가 설정 변경을 감지해 컨테이너를 다시 만들었다. **이미지는 다시 빌드하지 않았다.**
+- 호스트 포트(`8080`)는 고정하고 컨테이너 포트만 바꿨기 때문에, 접속 주소는 그대로 `localhost:8080`이다.
+- 실습 중 `APP_MODE`를 저장하지 않은 상태로 실행했을 때 포트만 `8000`으로 바뀌고 헤더는 `production`으로 남아, **각 변수가 독립적으로 적용됨**도 확인했다.
+
+**배움 포인트: 설정과 코드의 분리**
+
+- 같은 이미지를 개발·운영 환경에서 **설정 값만 바꿔** 재사용할 수 있다. 환경마다 이미지를 따로 빌드할 필요가 없다.
+- 설정이 코드와 분리되어 있어, 값을 바꿀 때 소스 수정·재빌드·재배포 없이 컨테이너 재생성만으로 반영된다.
+- 실무에서는 `.env`에 비밀번호·API 키 같은 민감정보를 넣는 경우가 많으므로 `.gitignore`에 추가하고, 변수 목록만 담은 `.env.example`을 공유한다. 이 실습의 `.env`에는 민감정보가 없어 재현성을 위해 저장소에 포함했다.

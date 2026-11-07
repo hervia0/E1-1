@@ -1,7 +1,16 @@
 services:
   web:
-    build: .                 # 현재 폴더의 Dockerfile로 빌드
+    build: .
     image: my-web:compose
     container_name: compose-web
+    environment:
+      NGINX_PORT: ${NGINX_PORT:-80}        # .env 값 주입 (없으면 80)
+      APP_MODE: ${APP_MODE:-production}
     ports:
-      - "8080:80"            # = docker run -p 8080:80
+      - "8080:${NGINX_PORT:-80}"           # 컨테이너 포트도 변수로
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    healthcheck:                           # 포트가 바뀌어도 헬스체크가 맞도록
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:$${NGINX_PORT}/ || exit 1"]
+      interval: 30s
+      timeout: 3s
